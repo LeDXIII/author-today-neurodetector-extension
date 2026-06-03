@@ -38,6 +38,11 @@
 
 ---
 
+
+<img width="399" height="255" alt="Основное окно расширения" src="https://github.com/user-attachments/assets/84724d4b-718f-4a72-88ab-d892f7d902ff" />
+
+
+
 ## Использование
 
 1. Откройте страницу книги на author.today: `https://author.today/work/NNNNNN`
