@@ -39,7 +39,8 @@
 ---
 
 
-<img width="399" height="255" alt="Основное окно расширения" src="https://github.com/user-attachments/assets/84724d4b-718f-4a72-88ab-d892f7d902ff" />
+<img width="404" height="435" alt="Основное окно расширения" src="https://github.com/user-attachments/assets/5d721053-2e88-4f1c-a0ff-cab104513b15" />
+
 
 
 
