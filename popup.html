@@ -26,6 +26,23 @@
       line-height: 1.4;
     }
 
+    .tabs {
+      display: flex; gap: 4px; margin-bottom: 12px;
+    }
+    .tab-btn {
+      flex: 1; padding: 8px; font-size: 12px; font-weight: 600;
+      background: #16213e; color: #888; border: none; border-radius: 6px;
+      cursor: pointer; transition: all 0.2s;
+    }
+    .tab-btn.active {
+      background: #0f3460; color: #00d4ff;
+    }
+    .tab-btn:hover:not(.active) {
+      background: #1a3a5e;
+    }
+    .tab-content { display: none; }
+    .tab-content.active { display: block; }
+
     .status {
       font-size: 13px; padding: 8px 12px; border-radius: 6px;
       background: #16213e; margin-bottom: 10px; min-height: 36px;
@@ -35,13 +52,18 @@
     .status.error { border-left: 3px solid #f44336; }
     .status.loading { border-left: 3px solid #ff9800; }
 
-    #check-btn {
+    #check-btn, #retry-btn {
       width: 100%; padding: 10px; font-size: 14px; font-weight: 600;
       background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
       color: white; border: none; border-radius: 8px; cursor: pointer;
+      margin-bottom: 8px;
     }
-    #check-btn:hover { opacity: 0.9; }
-    #check-btn:disabled { background: #555; cursor: not-allowed; opacity: 0.5; }
+    #check-btn:hover, #retry-btn:hover { opacity: 0.9; }
+    #check-btn:disabled, #retry-btn:disabled { background: #555; cursor: not-allowed; opacity: 0.5; }
+    #retry-btn {
+      background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
+      display: none;
+    }
 
     .progress-bar {
       width: 100%; height: 6px; background: #16213e; border-radius: 3px;
@@ -83,6 +105,45 @@
 
     .chapters-info { font-size: 11px; color: #666; margin-top: 8px; text-align: center; }
 
+    .copy-btn {
+      width: 100%; padding: 8px; font-size: 12px; font-weight: 600;
+      background: #0f3460; color: #00d4ff; border: 1px solid #00d4ff;
+      border-radius: 6px; cursor: pointer; margin-top: 8px;
+    }
+    .copy-btn:hover { background: #1a4a7a; }
+
+    .settings-group {
+      background: #16213e; border-radius: 8px; padding: 12px; margin-bottom: 10px;
+    }
+    .settings-group-title {
+      font-size: 12px; font-weight: 600; color: #00d4ff; margin-bottom: 10px;
+    }
+    .setting-item {
+      display: flex; justify-content: space-between; align-items: center;
+      margin-bottom: 10px;
+    }
+    .setting-item:last-child { margin-bottom: 0; }
+    .setting-label {
+      font-size: 12px; color: #ccc; flex: 1;
+    }
+    .setting-label small {
+      display: block; font-size: 10px; color: #666; margin-top: 2px;
+    }
+    .setting-input {
+      width: 80px; padding: 6px 8px; font-size: 12px;
+      background: #0f3460; color: #e0e0e0; border: 1px solid #333;
+      border-radius: 4px; text-align: right;
+    }
+    .setting-input:focus {
+      outline: none; border-color: #00d4ff;
+    }
+    #save-settings-btn {
+      width: 100%; padding: 10px; font-size: 13px; font-weight: 600;
+      background: linear-gradient(135deg, #4caf50 0%, #45a049 100%);
+      color: white; border: none; border-radius: 8px; cursor: pointer;
+    }
+    #save-settings-btn:hover { opacity: 0.9; }
+
     .history-section { margin-top: 12px; }
     .history-header { font-size: 12px; font-weight: 600; color: #888; margin-bottom: 6px; }
     .history-list {
@@ -111,37 +172,86 @@
   <h1>Author.today NeuroDetector</h1>
 
   <div class="disclaimer">
-    ️ Проверка выполняется только по <b>бесплатным</b> главам. Результат по полной книге может отличаться.
+    ⚠️ Проверка выполняется только по <b>бесплатным</b> главам. Результат по полной книге может отличаться.
   </div>
 
-  <div id="status" class="status info">Откройте страницу книги на author.today</div>
+  <div class="tabs">
+    <button class="tab-btn active" data-tab="check">Проверка</button>
+    <button class="tab-btn" data-tab="settings">Настройки</button>
+  </div>
 
-  <button id="check-btn" disabled>Проверить книгу</button>
+  <div id="tab-check" class="tab-content active">
+    <div id="status" class="status info">Откройте страницу книги на author.today</div>
 
-  <div id="progress-bar" class="progress-bar"><div class="progress-bar-fill" id="progress-fill"></div></div>
-  <div id="progress-text" class="progress-text"></div>
+    <button id="check-btn" disabled>Проверить книгу</button>
+    <button id="retry-btn">Повторить отправку</button>
 
-  <div id="results" class="results">
-    <div class="results-header">Результат проверки</div>
-    <div class="book-title" id="book-title"></div>
-    <div class="stats">
-      <div class="stat-box ai">
-        <div class="stat-value" id="ai-pct">0%</div>
-        <div class="stat-label">ИИ текст</div>
+    <div id="progress-bar" class="progress-bar"><div class="progress-bar-fill" id="progress-fill"></div></div>
+    <div id="progress-text" class="progress-text"></div>
+
+    <div id="results" class="results">
+      <div class="results-header">Результат проверки</div>
+      <div class="book-title" id="book-title"></div>
+      <div class="stats">
+        <div class="stat-box ai">
+          <div class="stat-value" id="ai-pct">0%</div>
+          <div class="stat-label">ИИ текст</div>
+        </div>
+        <div class="stat-box human">
+          <div class="stat-value" id="human-pct">0%</div>
+          <div class="stat-label">Человек</div>
+        </div>
       </div>
-      <div class="stat-box human">
-        <div class="stat-value" id="human-pct">0%</div>
-        <div class="stat-label">Человек</div>
+      <div id="verdict" class="verdict"></div>
+      <div id="chapters-info" class="chapters-info"></div>
+      <div id="last-check-info" class="chapters-info" style="display:none;margin-top:4px;"></div>
+      <button id="copy-btn" class="copy-btn" style="display:none;">📋 Копировать результат</button>
+    </div>
+
+    <div id="history" class="history-section" style="display:none;">
+      <div class="history-header">Проверенные книги:</div>
+      <div class="history-list" id="history-list"></div>
+    </div>
+  </div>
+
+  <div id="tab-settings" class="tab-content">
+    <div class="settings-group">
+      <div class="settings-group-title">Парсинг</div>
+      <div class="setting-item">
+        <div class="setting-label">
+          Макс. глав
+          <small>Лимит глав для проверки</small>
+        </div>
+        <input type="number" id="setting-max-chapters" class="setting-input" min="1" max="100">
+      </div>
+      <div class="setting-item">
+        <div class="setting-label">
+          Задержка между главами (мс)
+          <small>Пауза между переключением</small>
+        </div>
+        <input type="number" id="setting-delay" class="setting-input" min="100" max="10000" step="100">
       </div>
     </div>
-    <div id="verdict" class="verdict"></div>
-    <div id="chapters-info" class="chapters-info"></div>
-    <div id="last-check-info" class="chapters-info" style="display:none;margin-top:4px;"></div>
-  </div>
 
-  <div id="history" class="history-section" style="display:none;">
-    <div class="history-header">Проверенные книги:</div>
-    <div class="history-list" id="history-list"></div>
+    <div class="settings-group">
+      <div class="settings-group-title">Ожидание</div>
+      <div class="setting-item">
+        <div class="setting-label">
+          Время на рендер JS (мс)
+          <small>Ожидание после загрузки DOM</small>
+        </div>
+        <input type="number" id="setting-render-wait" class="setting-input" min="1000" max="30000" step="1000">
+      </div>
+      <div class="setting-item">
+        <div class="setting-label">
+          Таймаут главы (мс)
+          <small>Макс. ожидание ответа</small>
+        </div>
+        <input type="number" id="setting-timeout" class="setting-input" min="5000" max="60000" step="1000">
+      </div>
+    </div>
+
+    <button id="save-settings-btn">Сохранить настройки</button>
   </div>
 
   <script src="popup.js"></script>

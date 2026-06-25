@@ -1,4 +1,5 @@
 const checkBtn = document.getElementById('check-btn');
+const retryBtn = document.getElementById('retry-btn');
 const statusEl = document.getElementById('status');
 const progressBar = document.getElementById('progress-bar');
 const progressFill = document.getElementById('progress-fill');
@@ -10,13 +11,55 @@ const humanPctEl = document.getElementById('human-pct');
 const verdictEl = document.getElementById('verdict');
 const chaptersInfoEl = document.getElementById('chapters-info');
 const lastCheckInfoEl = document.getElementById('last-check-info');
+const copyBtn = document.getElementById('copy-btn');
 const historySection = document.getElementById('history');
 const historyList = document.getElementById('history-list');
 
 let isChecking = false;
 let currentBookId = null;
+let lastResult = null;
 
-// Определяем текущую книгу при открытии popup
+// Tabs
+document.querySelectorAll('.tab-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+    document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
+    btn.classList.add('active');
+    document.getElementById(`tab-${btn.dataset.tab}`).classList.add('active');
+  });
+});
+
+// Settings
+const settingMaxChapters = document.getElementById('setting-max-chapters');
+const settingDelay = document.getElementById('setting-delay');
+const settingRenderWait = document.getElementById('setting-render-wait');
+const settingTimeout = document.getElementById('setting-timeout');
+const saveSettingsBtn = document.getElementById('save-settings-btn');
+
+chrome.runtime.sendMessage({ action: 'get_settings' }, (response) => {
+  if (response?.settings) {
+    settingMaxChapters.value = response.settings.maxChapters;
+    settingDelay.value = response.settings.delayBetweenChaptersMs;
+    settingRenderWait.value = response.settings.renderWaitMs;
+    settingTimeout.value = response.settings.chapterTimeoutMs;
+  }
+});
+
+saveSettingsBtn.addEventListener('click', () => {
+  const settings = {
+    maxChapters: parseInt(settingMaxChapters.value) || 20,
+    delayBetweenChaptersMs: parseInt(settingDelay.value) || 1000,
+    renderWaitMs: parseInt(settingRenderWait.value) || 8000,
+    chapterTimeoutMs: parseInt(settingTimeout.value) || 25000,
+  };
+
+  chrome.runtime.sendMessage({ action: 'save_settings', settings }, () => {
+    saveSettingsBtn.textContent = 'Сохранено!';
+    setTimeout(() => { saveSettingsBtn.textContent = 'Сохранить настройки'; }, 2000);
+  });
+});
+
+// Detect current book
 chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
   if (tabs.length === 0) return;
   const url = tabs[0].url || '';
@@ -43,19 +86,18 @@ function loadHistory() {
     if (!response?.history) return;
     const history = response.history;
 
-    // Показываем результат текущей книги
     const current = history[currentBookId];
     if (current?.timestamp) {
       if (current.error) {
         setStatus(current.error, 'error');
         lastCheckInfoEl.textContent = `Попытка: ${fmtDate(current.timestamp)} (ошибка)`;
         lastCheckInfoEl.style.display = 'block';
+        retryBtn.style.display = 'block';
       } else {
         showResult(current);
       }
     }
 
-    // Показываем историю других книг
     showHistoryList(history);
   });
 }
@@ -100,9 +142,11 @@ function showHistoryList(history) {
 checkBtn.addEventListener('click', () => {
   isChecking = true;
   checkBtn.disabled = true;
+  retryBtn.style.display = 'none';
   resultsEl.classList.remove('active');
   historySection.style.display = 'none';
   lastCheckInfoEl.style.display = 'none';
+  copyBtn.style.display = 'none';
 
   progressBar.classList.add('active');
   progressText.classList.add('active');
@@ -118,6 +162,37 @@ checkBtn.addEventListener('click', () => {
   });
 });
 
+retryBtn.addEventListener('click', () => {
+  retryBtn.disabled = true;
+  progressBar.classList.add('active');
+  progressText.classList.add('active');
+  progressFill.style.width = '85%';
+  progressText.textContent = 'Повторная отправка...';
+  statusEl.textContent = 'Повторная отправка...';
+  statusEl.className = 'status loading';
+
+  chrome.runtime.sendMessage({ action: 'retry_neurodetector' }, () => {
+    if (chrome.runtime.lastError) {
+      setStatus(`Ошибка: ${chrome.runtime.lastError.message}`, 'error');
+      retryBtn.disabled = false;
+    }
+  });
+});
+
+copyBtn.addEventListener('click', () => {
+  if (!lastResult) return;
+
+  const text = `${lastResult.bookTitle}\n` +
+    `ИИ: ${lastResult.aiPercent.toFixed(1)}% | Человек: ${lastResult.humanPercent.toFixed(1)}%\n` +
+    `${lastResult.verdict}\n` +
+    `Глав: ${lastResult.chaptersCount}, Сегментов: ${lastResult.segmentsCount}`;
+
+  navigator.clipboard.writeText(text).then(() => {
+    copyBtn.textContent = '✅ Скопировано!';
+    setTimeout(() => { copyBtn.textContent = '📋 Копировать результат'; }, 2000);
+  });
+});
+
 chrome.runtime.onMessage.addListener((message) => {
   if (message.action === 'progress') {
     progressFill.style.width = `${message.percent}%`;
@@ -130,6 +205,7 @@ chrome.runtime.onMessage.addListener((message) => {
     resetUI();
   } else if (message.action === 'error') {
     setStatus(message.text, 'error');
+    retryBtn.style.display = 'block';
     loadHistory();
     resetUI();
   }
@@ -146,9 +222,12 @@ function resetUI() {
   progressText.classList.remove('active');
   checkBtn.disabled = false;
   checkBtn.textContent = 'Проверить заново';
+  retryBtn.disabled = false;
 }
 
 function showResult(data) {
+  lastResult = data;
+
   bookTitleEl.textContent = data.bookTitle || 'Книга';
   aiPctEl.textContent = `${data.aiPercent?.toFixed(1) ?? '?'}%`;
   humanPctEl.textContent = `${data.humanPercent?.toFixed(1) ?? '?'}%`;
@@ -163,6 +242,7 @@ function showResult(data) {
   lastCheckInfoEl.textContent = `Проверка: ${fmtDate(data.timestamp)}`;
   lastCheckInfoEl.style.display = 'block';
 
+  copyBtn.style.display = 'block';
   resultsEl.classList.add('active');
   setStatus('Проверка завершена!', 'success');
 }

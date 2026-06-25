@@ -1,78 +1,13 @@
 /**
  * Content script for author.today reader pages.
- * Automatically detects #text-container when Knockout.js renders it,
- * extracts paragraph text, and sends it to the background service worker.
- * Also provides a manual "Check chapter" button.
+ * Adds a manual "Check chapter" button for single-chapter NeuroDetector check.
+ * Auto-collection is handled by background.js via executeScript.
  */
 (function () {
   'use strict';
 
   if (!window.location.pathname.match(/\/reader\/\d+\/\d+/)) return;
 
-  let sent = false;
-
-  // Wait for Knockout.js to render #text-container with paragraphs
-  const observer = new MutationObserver((mutations, obs) => {
-    if (sent) return;
-
-    const container = document.querySelector('#text-container');
-    if (!container) return;
-
-    const paragraphs = container.querySelectorAll('p');
-    if (paragraphs.length === 0) return;
-
-    const text = Array.from(paragraphs)
-      .map(p => p.textContent.trim())
-      .filter(t => t.length > 0)
-      .join('\n\n');
-
-    if (text.length < 50) return;
-
-    sent = true;
-    obs.disconnect();
-
-    // Detect paid chapter
-    const bodyLower = (document.body.textContent || '').toLowerCase();
-    const paidPatterns = [
-      'платный доступ', 'для продолжения чтения', 'закрытый контент',
-      'buy chapter', 'купить главу', 'приобретите доступ', 'paid access',
-    ];
-    const isPaid = paidPatterns.some(p => bodyLower.includes(p));
-
-    chrome.runtime.sendMessage({
-      action: 'chapter_ready',
-      text: isPaid ? '' : text,
-      isPaid,
-      textLen: text.length,
-    });
-  });
-
-  observer.observe(document.body, { childList: true, subtree: true });
-
-  // Fallback: if no content found within timeout, send body text
-  setTimeout(() => {
-    if (sent) return;
-    sent = true;
-    observer.disconnect();
-
-    const bodyText = (document.body.textContent || '').trim();
-    const bodyLower = bodyText.toLowerCase();
-    const paidPatterns = [
-      'платный доступ', 'для продолжения чтения', 'закрытый контент',
-      'buy chapter', 'купить главу', 'приобретите доступ', 'paid access',
-    ];
-    const isPaid = paidPatterns.some(p => bodyLower.includes(p));
-
-    chrome.runtime.sendMessage({
-      action: 'chapter_ready',
-      text: isPaid ? '' : bodyText.substring(0, 15000),
-      isPaid,
-      textLen: bodyText.length,
-      fallback: true,
-    });
-  }, 15000);
-
-  // Add manual check button
   setTimeout(() => {
     const container = document.querySelector('#text-container');
     if (!container || document.getElementById('neurodetector-btn')) return;
@@ -106,7 +41,7 @@
       } catch (e) {
         btn.textContent = `❌ ${e.message}`;
       }
-      setTimeout(() => { btn.disabled = false; btn.textContent = ' Проверить главу'; }, 3000);
+      setTimeout(() => { btn.disabled = false; btn.textContent = '🤖 Проверить главу'; }, 3000);
     });
 
     container.parentNode.insertBefore(btn, container);

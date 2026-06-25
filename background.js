@@ -5,40 +5,58 @@
  * Architecture:
  * 1. Parses book TOC from /work/{bookId} page
  * 2. Navigates the active tab through each chapter sequentially
- * 3. Content script on each reader page extracts text and sends it back
- * 4. After collecting all texts, sends to Yandex NeuroDetector API
- * 5. Results are stored in chrome.storage.local keyed by bookId
+ * 3. After DOM load + JS render wait, extracts text via executeScript
+ * 4. Sends collected text to Yandex NeuroDetector API with retry
+ * 5. Results stored in chrome.storage.local keyed by bookId
  */
 
 const NEURODETECTOR_URL = 'https://yandex.ru/lab/neurodetector/api/analyze/text';
-const DELAY_BETWEEN_CHAPTERS_MS = 1000;
-const MAX_CHAPTERS = 20;
-const CHAPTER_TIMEOUT_MS = 25000;
+const MAX_RETRY_ATTEMPTS = 5;
+const RETRY_BASE_DELAY_MS = 3000;
+
+const DEFAULT_SETTINGS = {
+  maxChapters: 20,
+  renderWaitMs: 4000,
+  delayBetweenChaptersMs: 800,
+  chapterTimeoutMs: 20000,
+};
 
 let checkState = null;
 let chapterTimeout = null;
 
-/**
- * Handles messages from popup and content scripts.
- */
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.action === 'check_book') {
     checkBook(message.tabId, message.url);
-    sendResponse({});
-  } else if (message.action === 'chapter_ready') {
-    handleChapterReady(message, sender);
     sendResponse({});
   } else if (message.action === 'get_history') {
     chrome.storage.local.get('checkHistory', (data) => {
       sendResponse({ history: data.checkHistory || {} });
     });
     return true;
+  } else if (message.action === 'get_settings') {
+    chrome.storage.local.get('settings', (data) => {
+      sendResponse({ settings: { ...DEFAULT_SETTINGS, ...(data.settings || {}) } });
+    });
+    return true;
+  } else if (message.action === 'save_settings') {
+    chrome.storage.local.set({ settings: message.settings }, () => {
+      sendResponse({ ok: true });
+    });
+    return true;
+  } else if (message.action === 'retry_neurodetector') {
+    retryNeuroDetector();
+    sendResponse({});
   }
 });
 
-/**
- * Entry point: validates URL, parses TOC, starts chapter iteration.
- */
+async function loadSettings() {
+  return new Promise((resolve) => {
+    chrome.storage.local.get('settings', (data) => {
+      resolve({ ...DEFAULT_SETTINGS, ...(data.settings || {}) });
+    });
+  });
+}
+
 async function checkBook(tabId, url) {
   const workMatch = url.match(/author\.today\/work\/(\d+)/);
   if (!workMatch) {
@@ -47,6 +65,7 @@ async function checkBook(tabId, url) {
   }
 
   const bookId = workMatch[1];
+  const settings = await loadSettings();
 
   try {
     sendProgress(5, 'Парсинг оглавления...');
@@ -57,7 +76,7 @@ async function checkBook(tabId, url) {
       return;
     }
 
-    const chapters = tocData.chapters.slice(0, MAX_CHAPTERS);
+    const chapters = tocData.chapters.slice(0, settings.maxChapters);
     sendProgress(10, `Найдено ${chapters.length} глав. Начинаю обход...`);
 
     checkState = {
@@ -68,6 +87,7 @@ async function checkBook(tabId, url) {
       currentIndex: 0,
       allTexts: [],
       paidDetected: false,
+      settings,
     };
 
     goToChapter(0);
@@ -78,12 +98,13 @@ async function checkBook(tabId, url) {
 }
 
 /**
- * Navigates the tab to a chapter page and waits for content script response.
+ * Navigates tab to chapter, waits for DOM load via tabs.onUpdated,
+ * then waits for JS render and extracts text directly.
  */
 function goToChapter(index) {
   if (!checkState) return;
 
-  const { chapters, paidDetected, originalTabId } = checkState;
+  const { chapters, paidDetected, originalTabId, settings } = checkState;
 
   if (index >= chapters.length || paidDetected) {
     finalizeCheck();
@@ -97,57 +118,113 @@ function goToChapter(index) {
 
   const readerUrl = `https://author.today/reader/${checkState.bookId}/${chapter.id}`;
 
-  // Timeout fallback if content script doesn't respond
   clearTimeout(chapterTimeout);
   chapterTimeout = setTimeout(() => {
+    console.log(`[Ch${index}] Timeout`);
     goToChapter(index + 1);
-  }, CHAPTER_TIMEOUT_MS);
+  }, settings.chapterTimeoutMs);
 
-  // Navigate the tab, then inject content script (tabs.update may not trigger it)
-  chrome.tabs.update(originalTabId, { url: readerUrl }, () => {
-    setTimeout(() => injectContentScript(originalTabId), 1000);
+  // Navigate tab
+  chrome.tabs.update(originalTabId, { url: readerUrl });
+
+  // Wait for DOM load via onUpdated
+  const onUpdated = (updatedTabId, changeInfo) => {
+    if (updatedTabId !== originalTabId || changeInfo.status !== 'complete') return;
+    chrome.tabs.onUpdated.removeListener(onUpdated);
+
+    console.log(`[Ch${index}] DOM loaded, waiting ${settings.renderWaitMs}ms for JS...`);
+
+    // Wait for Knockout.js render
+    setTimeout(() => {
+      extractTextDirect(originalTabId, chapter.title, index);
+    }, settings.renderWaitMs);
+  };
+
+  chrome.tabs.onUpdated.addListener(onUpdated);
+}
+
+/**
+ * Extracts text directly via executeScript — no content script dependency.
+ */
+function extractTextDirect(tabId, chapterTitle, chapterIndex) {
+  chrome.scripting.executeScript({
+    target: { tabId: tabId },
+    func: () => {
+      const bodyText = document.body ? (document.body.textContent || '') : '';
+      const bodyLower = bodyText.toLowerCase();
+
+      // Paid chapter detection
+      const paidPatterns = [
+        'платный доступ', 'для продолжения чтения', 'закрытый контент',
+        'buy chapter', 'купить главу', 'приобретите доступ', 'paid access',
+      ];
+      for (const p of paidPatterns) {
+        if (bodyLower.includes(p)) return { paid: true, text: '', bodyLen: bodyText.length };
+      }
+
+      const locks = document.querySelectorAll(
+        '.content-lock, .authorize, .purchase, [class*="lock"], [class*="buy"]'
+      );
+      if (locks.length > 2) return { paid: true, text: '', bodyLen: bodyText.length };
+
+      // Extract from #text-container
+      const container = document.querySelector('#text-container');
+      if (container) {
+        const paragraphs = container.querySelectorAll('p');
+        if (paragraphs.length > 0) {
+          const text = Array.from(paragraphs)
+            .map(p => p.textContent.trim())
+            .filter(t => t.length > 0)
+            .join('\n\n');
+          if (text.length > 20) return { text, paid: false, source: 'container-p' };
+        }
+        const text = container.textContent.trim();
+        if (text.length > 20) return { text, paid: false, source: 'container' };
+      }
+
+      // Fallback: body text
+      if (bodyText.length > 100) {
+        return { text: bodyText.substring(0, 15000), paid: false, source: 'body' };
+      }
+
+      return { text: '', paid: false, source: 'empty', bodyLen: bodyText.length };
+    },
+  }).then((results) => {
+    if (!checkState) return;
+
+    clearTimeout(chapterTimeout);
+
+    const data = results?.[0]?.result;
+    console.log(`[Ch${chapterIndex}] Extracted: source=${data?.source}, textLen=${data?.text?.length || 0}, paid=${data?.paid}`);
+
+    if (!data) {
+      console.log(`[Ch${chapterIndex}] No result from executeScript`);
+      goToChapter(chapterIndex + 1);
+      return;
+    }
+
+    if (data.paid) {
+      checkState.paidDetected = true;
+      sendProgress(75, `Платная глава "${chapterTitle}". Стоп.`);
+      finalizeCheck();
+      return;
+    }
+
+    if (data.text && data.text.length > 20) {
+      checkState.allTexts.push(`=== ${chapterTitle} ===\n${data.text}`);
+    } else {
+      console.log(`[Ch${chapterIndex}] Empty text, bodyLen=${data.bodyLen || 0}`);
+    }
+
+    const { settings } = checkState;
+    setTimeout(() => goToChapter(chapterIndex + 1), settings.delayBetweenChaptersMs);
+  }).catch((e) => {
+    clearTimeout(chapterTimeout);
+    console.error(`[Ch${chapterIndex}] executeScript error:`, e);
+    goToChapter(chapterIndex + 1);
   });
 }
 
-/**
- * Injects content.js into the tab to extract chapter text.
- */
-function injectContentScript(tabId) {
-  chrome.scripting.executeScript({
-    target: { tabId: tabId },
-    files: ['content.js'],
-  }).catch(() => {});
-}
-
-/**
- * Receives extracted text from content script.
- */
-function handleChapterReady(message, sender) {
-  if (!checkState) return;
-  if (sender.tab?.id !== checkState.originalTabId) return;
-
-  clearTimeout(chapterTimeout);
-
-  const { currentIndex, chapters } = checkState;
-  const chapter = chapters[currentIndex];
-
-  if (message.isPaid) {
-    checkState.paidDetected = true;
-    sendProgress(75, `Платная глава "${chapter.title}". Стоп.`);
-    finalizeCheck();
-    return;
-  }
-
-  if (message.text && message.text.length > 50) {
-    checkState.allTexts.push(`=== ${chapter.title} ===\n${message.text}`);
-  }
-
-  setTimeout(() => goToChapter(currentIndex + 1), DELAY_BETWEEN_CHAPTERS_MS);
-}
-
-/**
- * Saves result to chrome.storage.local, keyed by bookId.
- */
 function saveResult(resultData) {
   chrome.storage.local.get('checkHistory', (data) => {
     const history = data.checkHistory || {};
@@ -156,9 +233,30 @@ function saveResult(resultData) {
   });
 }
 
-/**
- * Finalizes: sends collected text to NeuroDetector API, saves and displays result.
- */
+async function sendToNeuroDetectorWithRetry(text) {
+  let lastError = null;
+
+  for (let attempt = 1; attempt <= MAX_RETRY_ATTEMPTS; attempt++) {
+    try {
+      sendProgress(85 + Math.round((attempt / MAX_RETRY_ATTEMPTS) * 10),
+        `Отправка в NeuroDetector (попытка ${attempt}/${MAX_RETRY_ATTEMPTS})...`);
+
+      const result = await sendToNeuroDetector(text);
+      return result;
+    } catch (e) {
+      lastError = e;
+
+      if (attempt < MAX_RETRY_ATTEMPTS) {
+        const delay = RETRY_BASE_DELAY_MS * Math.pow(2, attempt - 1);
+        sendProgress(85, `Ошибка: ${e.message}. Повтор через ${Math.round(delay / 1000)}с...`);
+        await sleep(delay);
+      }
+    }
+  }
+
+  throw new Error(`Не удалось отправить после ${MAX_RETRY_ATTEMPTS} попыток: ${lastError?.message || 'неизвестная ошибка'}`);
+}
+
 async function finalizeCheck() {
   if (!checkState) return;
 
@@ -166,7 +264,6 @@ async function finalizeCheck() {
 
   const { bookTitle, allTexts, paidDetected, bookId, originalTabId } = checkState;
 
-  // Return tab to book page
   if (originalTabId) {
     chrome.tabs.update(originalTabId, { url: `https://author.today/work/${bookId}` });
   }
@@ -185,7 +282,7 @@ async function finalizeCheck() {
   sendProgress(85, `Собрано ${allTexts.length} глав (${combinedText.length} зн.). Отправляю...`);
 
   try {
-    const result = await sendToNeuroDetector(combinedText);
+    const result = await sendToNeuroDetectorWithRetry(combinedText);
     sendProgress(100, 'Готово!');
 
     resultData.aiPercent = result.aiPercent;
@@ -204,9 +301,37 @@ async function finalizeCheck() {
   checkState = null;
 }
 
-/**
- * Parses table of contents from the book page to extract chapter IDs.
- */
+async function retryNeuroDetector() {
+  if (!checkState || checkState.allTexts.length === 0) {
+    sendError('Нет данных для повторной отправки');
+    return;
+  }
+
+  const { bookTitle, allTexts, paidDetected, bookId } = checkState;
+  const combinedText = allTexts.join('\n\n');
+
+  sendProgress(85, `Повторная отправка (${combinedText.length} зн.)...`);
+
+  try {
+    const result = await sendToNeuroDetectorWithRetry(combinedText);
+    sendProgress(100, 'Готово!');
+
+    const resultData = {
+      bookId, timestamp: Date.now(), bookTitle,
+      chaptersCount: allTexts.length, paidDetected,
+      aiPercent: result.aiPercent, humanPercent: result.humanPercent,
+      verdict: result.verdict, segmentsCount: result.segmentsCount,
+    };
+
+    saveResult(resultData);
+    chrome.runtime.sendMessage({ action: 'result', data: resultData });
+  } catch (e) {
+    sendError(`NeuroDetector: ${e.message}`);
+  }
+
+  checkState = null;
+}
+
 async function parseTableOfContents(tabId) {
   await chrome.tabs.reload(tabId);
   await new Promise((resolve) => {
@@ -240,9 +365,6 @@ async function parseTableOfContents(tabId) {
   return results?.find(r => r.result?.title)?.result || null;
 }
 
-/**
- * Sends text to Yandex NeuroDetector API and parses the response.
- */
 async function sendToNeuroDetector(text) {
   const res = await fetch(NEURODETECTOR_URL, {
     method: 'POST',
@@ -250,10 +372,16 @@ async function sendToNeuroDetector(text) {
     body: JSON.stringify({ text }),
   });
 
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  if (res.status === 429) {
+    throw new Error('Слишком много запросов (429). Яндекс ограничивает частоту.');
+  }
+
+  if (!res.ok) {
+    throw new Error(`HTTP ${res.status}`);
+  }
 
   const data = await res.json();
-  if (!data.ok || !data.results) throw new Error('Bad API response');
+  if (!data.ok || !data.results) throw new Error('Некорректный ответ API');
 
   const stats = data.results.stats || {};
   const ai = (stats.AI_count || 0) + (stats.LIKELY_AI_count || 0);
