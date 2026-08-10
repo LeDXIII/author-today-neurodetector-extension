@@ -14,7 +14,7 @@
 
 ### Скачайте архив
 
-Необходимо нажать кнопку зелёную **"Code"** в правом верхнем углу, затем выбрать **"Download ZIP"**
+Необходимо нажать зелёную кнопку **"Code"** в правом верхнем углу, затем выбрать **"Download ZIP"**
 
 <img width="973" height="464" alt="image" src="https://github.com/user-attachments/assets/250287e1-58d4-4bae-a273-049fbb9575e8" />
 
